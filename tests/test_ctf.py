@@ -187,6 +187,19 @@ class TestWatcher(Case):
         self.w.tick(2)
         self.assertEqual(self.w.tick(4.5)[0][1], self.files / "big.zip")
 
+    def test_firefox_placeholder_waits_for_part(self):
+        # Firefox crée a.zip vide à côté de a.zip.part pendant tout le téléchargement
+        (self.dl / "a.zip").write_text("")
+        part = self.dl / "a.zip.part"
+        part.write_text("début")
+        for t in (0.5, 3, 6):
+            self.assertEqual(self.w.tick(t), [])
+        part.write_text("contenu complet")
+        os.replace(part, self.dl / "a.zip")
+        self.w.tick(7)
+        self.assertEqual(self.w.tick(9.5), [(self.dl / "a.zip", self.files / "a.zip")])
+        self.assertEqual((self.files / "a.zip").read_text(), "contenu complet")
+
     def test_ovpn_goes_to_config(self):
         self.drop("lab_salem.ovpn")
         self.w.tick(0.5)
@@ -317,11 +330,19 @@ class TestVpn(Case):
     def test_vpn_running_reads_pid(self):
         self.assertIsNone(ctf.vpn_running())
         (self.cache / "vpn.pid").write_text(f"{os.getpid()}\n")
-        self.assertEqual(ctf.vpn_running(), os.getpid())
+        self.assertIsNone(ctf.vpn_running())  # PID vivant mais ce n'est pas openvpn
+        with mock.patch.object(ctf, "proc_name", return_value="openvpn"):
+            self.assertEqual(ctf.vpn_running(), os.getpid())
         (self.cache / "vpn.pid").write_text("999999999\n")
         self.assertIsNone(ctf.vpn_running())
         (self.cache / "vpn.pid").write_text("pas un pid")
         self.assertIsNone(ctf.vpn_running())
+
+    def test_vpn_stop_never_kills_reused_pid(self):
+        (self.cache / "vpn.pid").write_text(f"{os.getpid()}\n")
+        with mock.patch.object(ctf.subprocess, "run") as run:
+            self.assertEqual(self.run_main("vpn", "stop")[0], 0)
+        run.assert_not_called()
 
     def test_vpn_add_copies(self):
         src = self.tmp / "lab_salem.ovpn"

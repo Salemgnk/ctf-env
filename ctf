@@ -201,6 +201,10 @@ class Watcher:
         for name in present:
             if name in self.seen:
                 continue
+            if any((self.dl / (name + suf)).exists() for suf in PARTIAL):
+                # Firefox laisse un fichier vide au nom final tant que le .part existe
+                self.pending.pop(name, None)
+                continue
             src = self.dl / name
             try:
                 size = src.stat().st_size
@@ -294,7 +298,17 @@ def pid_file():
     return paths()["cache"] / "vpn.pid"
 
 
+def proc_name(pid):
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return None
+
+
 def vpn_running():
+    """PID d'openvpn lancé par ctf, ou None. Le fichier PID appartient à root et peut
+    rester après la fin d'openvpn : on vérifie que le processus est bien openvpn, pour
+    ne jamais tuer un autre programme qui aurait récupéré ce numéro."""
     try:
         pid = int(pid_file().read_text().strip())
     except (OSError, ValueError):
@@ -302,10 +316,10 @@ def vpn_running():
     try:
         os.kill(pid, 0)
     except PermissionError:  # openvpn tourne en root
-        return pid
+        pass
     except (OSError, OverflowError):
         return None
-    return pid
+    return pid if proc_name(pid) == "openvpn" else None
 
 
 def pick_vpn(name):
