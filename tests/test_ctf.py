@@ -238,5 +238,111 @@ class TestWatcher(Case):
         self.assertIn("WantedBy=default.target", unit)
 
 
+class TestVpn(Case):
+    def setUp(self):
+        super().setUp()
+        self.vpn = self.tmp / "config" / "vpn"
+        self.cache = self.tmp / "cache"
+
+    def add(self, name):
+        self.vpn.mkdir(exist_ok=True)
+        (self.vpn / name).write_text("client\n")
+
+    def test_vpn_no_file_explains(self):
+        code, _, err = self.run_main("vpn")
+        self.assertEqual(code, 1)
+        self.assertIn("Connection Pack", err)
+        self.assertIn("ctf vpn add", err)
+
+    def test_vpn_several_files_lists_them(self):
+        self.add("lab_eu.ovpn")
+        self.add("starting_point.ovpn")
+        with mock.patch.object(ctf, "vpn_running", return_value=None), \
+             mock.patch.object(ctf.subprocess, "run") as run:
+            code, _, err = self.run_main("vpn")
+        self.assertEqual(code, 1)
+        self.assertIn("lab_eu", err)
+        self.assertIn("starting_point", err)
+        run.assert_not_called()
+
+    def test_vpn_unknown_name(self):
+        self.add("lab_eu.ovpn")
+        code, _, err = self.run_main("vpn", "autre")
+        self.assertEqual(code, 1)
+        self.assertIn("lab_eu", err)
+
+    def test_vpn_start_command(self):
+        self.add("lab_eu.ovpn")
+        done = mock.Mock(returncode=0)
+        with mock.patch.object(ctf, "vpn_running", return_value=None), \
+             mock.patch.object(ctf.subprocess, "run", return_value=done) as run, \
+             mock.patch.object(ctf, "tun_ip", side_effect=[None, "10.10.14.7"]), \
+             mock.patch.object(ctf.time, "sleep"):
+            code, out, _ = self.run_main("vpn", "lab_eu")
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_args[0][0], [
+            "sudo", "openvpn", "--config", str(self.vpn / "lab_eu.ovpn"), "--daemon",
+            "--writepid", str(self.cache / "vpn.pid"), "--log", str(self.cache / "vpn.log")])
+        self.assertIn("10.10.14.7", out)
+
+    def test_vpn_timeout_shows_log(self):
+        self.add("lab_eu.ovpn")
+        (self.cache / "vpn.log").write_text("AUTH_FAILED\n")
+        with mock.patch.object(ctf, "vpn_running", return_value=None), \
+             mock.patch.object(ctf.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+             mock.patch.object(ctf, "tun_ip", return_value=None), \
+             mock.patch.object(ctf.time, "sleep"):
+            code, _, err = self.run_main("vpn")
+        self.assertEqual(code, 1)
+        self.assertIn("AUTH_FAILED", err)
+
+    def test_vpn_already_running(self):
+        self.add("lab_eu.ovpn")
+        with mock.patch.object(ctf, "vpn_running", return_value=4242), \
+             mock.patch.object(ctf, "tun_ip", return_value="10.10.14.7"), \
+             mock.patch.object(ctf.subprocess, "run") as run:
+            code, out, _ = self.run_main("vpn")
+        self.assertEqual(code, 0)
+        self.assertIn("déjà", out)
+        self.assertIn("10.10.14.7", out)
+        run.assert_not_called()
+
+    def test_vpn_running_reads_pid(self):
+        self.assertIsNone(ctf.vpn_running())
+        (self.cache / "vpn.pid").write_text(f"{os.getpid()}\n")
+        self.assertEqual(ctf.vpn_running(), os.getpid())
+        (self.cache / "vpn.pid").write_text("999999999\n")
+        self.assertIsNone(ctf.vpn_running())
+        (self.cache / "vpn.pid").write_text("pas un pid")
+        self.assertIsNone(ctf.vpn_running())
+
+    def test_vpn_add_copies(self):
+        src = self.tmp / "lab_salem.ovpn"
+        src.write_text("client\n")
+        code, out, _ = self.run_main("vpn", "add", str(src))
+        self.assertEqual(code, 0)
+        self.assertTrue((self.vpn / "lab_salem.ovpn").exists())
+        self.assertTrue(src.exists())
+        self.assertEqual(self.run_main("vpn", "add", str(self.tmp / "absent.ovpn"))[0], 1)
+        bad = self.tmp / "notes.txt"
+        bad.write_text("x")
+        self.assertEqual(self.run_main("vpn", "add", str(bad))[0], 1)
+
+    def test_vpn_stop(self):
+        code, out, _ = self.run_main("vpn", "stop")
+        self.assertEqual(code, 0)
+        self.assertIn("Aucune connexion", out)
+        with mock.patch.object(ctf, "vpn_running", return_value=4242), \
+             mock.patch.object(ctf.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+            self.assertEqual(self.run_main("vpn", "stop")[0], 0)
+        self.assertEqual(run.call_args[0][0], ["sudo", "kill", "4242"])
+
+    def test_vpn_files_listed(self):
+        self.add("b.ovpn")
+        self.add("a.ovpn")
+        (self.vpn / "notes.txt").write_text("x")
+        self.assertEqual([p.name for p in ctf.vpn_files()], ["a.ovpn", "b.ovpn"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -258,6 +258,116 @@ def watch():
         return 0
 
 
+# ---------- VPN ----------
+
+NO_VPN = (
+    "Aucun fichier VPN pour l'instant.\n"
+    "Sur HTB : bouton « Connect to HTB » en haut à droite, choisis le type (Machines, Starting Point...)\n"
+    "puis OpenVPN et télécharge le Connection Pack (.ovpn).\n"
+    "S'il arrive dans ~/Downloads, il est rangé tout seul ; sinon : ctf vpn add <fichier.ovpn>"
+)
+
+
+def vpn_dir():
+    return paths()["config"] / "vpn"
+
+
+def vpn_files():
+    d = vpn_dir()
+    return sorted(p for p in d.glob("*.ovpn") if p.is_file()) if d.is_dir() else []
+
+
+def vpn_add(src):
+    src = Path(src).expanduser()
+    if not src.is_file():
+        raise ValueError(f"Fichier introuvable : {src}")
+    if src.suffix.lower() != ".ovpn":
+        raise ValueError(f"Ce n'est pas un fichier .ovpn : {src}")
+    vpn_dir().mkdir(parents=True, exist_ok=True)
+    dst = free_name(vpn_dir(), src.name)
+    shutil.copy2(src, dst)
+    os.chmod(dst, 0o600)
+    return dst
+
+
+def pid_file():
+    return paths()["cache"] / "vpn.pid"
+
+
+def vpn_running():
+    try:
+        pid = int(pid_file().read_text().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except PermissionError:  # openvpn tourne en root
+        return pid
+    except (OSError, OverflowError):
+        return None
+    return pid
+
+
+def pick_vpn(name):
+    files = vpn_files()
+    if not files:
+        raise ValueError(NO_VPN)
+    if name:
+        for f in files:
+            if name in (f.name, f.stem):
+                return f
+        raise ValueError(f"Pas de fichier VPN « {name} ». Disponibles : " + ", ".join(f.stem for f in files))
+    if len(files) > 1:
+        raise ValueError("Plusieurs fichiers VPN, précise lequel :\n" + "\n".join(f"  ctf vpn {f.stem}" for f in files))
+    return files[0]
+
+
+def log_tail(n=8):
+    try:
+        return "\n".join((paths()["cache"] / "vpn.log").read_text(errors="replace").splitlines()[-n:])
+    except OSError:
+        return f"(journal illisible : sudo tail {paths()['cache'] / 'vpn.log'})"
+
+
+def vpn_start(name=None):
+    pid = vpn_running()
+    if pid:
+        ip = tun_ip()
+        print(f"Le VPN tourne déjà (openvpn {pid})" + (f", ton IP est {ip}" if ip else "") + ". ctf vpn stop pour le couper.")
+        return 0
+    conf = pick_vpn(name)
+    cache = paths()["cache"]
+    cache.mkdir(parents=True, exist_ok=True)
+    print(f"Connexion avec {conf.name} (mot de passe sudo demandé)...")
+    r = subprocess.run(["sudo", "openvpn", "--config", str(conf), "--daemon",
+                        "--writepid", str(pid_file()), "--log", str(cache / "vpn.log")])
+    if r.returncode:
+        err("openvpn n'a pas pu démarrer.")
+        return 1
+    for _ in range(30):  # 15 s
+        ip = tun_ip()
+        if ip:
+            print(f"VPN connecté, ton IP est {ip}")
+            return 0
+        time.sleep(0.5)
+    err("Le VPN ne s'est pas connecté en 15 s. Fin du journal :")
+    err(log_tail())
+    return 1
+
+
+def vpn_stop():
+    pid = vpn_running()
+    if not pid:
+        print("Aucune connexion VPN lancée par ctf.")
+        return 0
+    r = subprocess.run(["sudo", "kill", str(pid)])
+    if r.returncode:
+        err(f"Impossible d'arrêter openvpn ({pid}).")
+        return 1
+    print("VPN coupé.")
+    return 0
+
+
 # ---------- état ----------
 
 def tun_ip():
@@ -324,6 +434,15 @@ def main(argv=None):
             challenge_off()
             print("Plus de challenge en cours : les téléchargements restent dans ~/Downloads.")
             return 0
+        if cmd == "vpn":
+            if args[:1] == ["stop"] and len(args) == 1:
+                return vpn_stop()
+            if args[:1] == ["add"] and len(args) == 2:
+                dst = vpn_add(args[1])
+                print(f"Fichier VPN ajouté : {dst.stem}. Connexion : ctf vpn {dst.stem if len(vpn_files()) > 1 else ''}".rstrip())
+                return 0
+            if len(args) <= 1:
+                return vpn_start(args[0] if args else None)
         if cmd == "watch" and not args:
             return watch()
         if cmd == "ls" and not args:
