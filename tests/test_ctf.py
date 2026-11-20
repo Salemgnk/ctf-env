@@ -131,5 +131,112 @@ class TestChallenges(Case):
         self.assertEqual(self.run_main("nimporte")[0], 2)
 
 
+class TestWatcher(Case):
+    def setUp(self):
+        super().setUp()
+        (self.dl / "ancien.pdf").write_text("déjà là")
+        self.w = ctf.Watcher(now=0)
+        self.d = ctf.challenge_new("htb/cicada")
+        self.files = self.d / "fichiers"
+
+    def drop(self, name, data="x"):
+        p = self.dl / name
+        p.write_text(data)
+        return p
+
+    def test_existing_files_never_moved(self):
+        for t in (1, 3, 6):
+            self.assertEqual(self.w.tick(t), [])
+        self.assertTrue((self.dl / "ancien.pdf").exists())
+
+    def test_moves_new_file_after_stable(self):
+        self.drop("obsidian_key.zip")
+        self.assertEqual(self.w.tick(0.5), [])
+        self.assertEqual(self.w.tick(1.5), [])
+        moved = self.w.tick(2.6)
+        self.assertEqual(moved, [(self.dl / "obsidian_key.zip", self.files / "obsidian_key.zip")])
+        self.assertTrue((self.files / "obsidian_key.zip").exists())
+        self.assertFalse((self.dl / "obsidian_key.zip").exists())
+
+    def test_waits_until_size_stable(self):
+        p = self.drop("lent.bin", "a")
+        for t in range(1, 8):
+            p.write_text("a" * (t + 1))
+            self.assertEqual(self.w.tick(t), [], t)
+        self.assertEqual(self.w.tick(10.5)[0][1], self.files / "lent.bin")
+
+    def test_ignores_partial_and_hidden(self):
+        for n in ("a.zip.crdownload", "b.part", "c.tmp", "d.download", ".cache"):
+            self.drop(n)
+        (self.dl / "dossier").mkdir()
+        self.w.tick(1)
+        self.assertEqual(self.w.tick(5), [])
+        self.assertEqual(list(self.files.iterdir()), [])
+
+    def test_partial_renamed_when_done(self):
+        p = self.drop("big.zip.crdownload")
+        self.w.tick(1)
+        p.rename(self.dl / "big.zip")
+        self.w.tick(2)
+        self.assertEqual(self.w.tick(4.5)[0][1], self.files / "big.zip")
+
+    def test_ovpn_goes_to_config(self):
+        self.drop("lab_salem.ovpn")
+        self.w.tick(0.5)
+        moved = self.w.tick(3)
+        self.assertEqual(moved[0][1], self.tmp / "config" / "vpn" / "lab_salem.ovpn")
+
+    def test_ovpn_moved_even_without_current(self):
+        ctf.challenge_off()
+        self.drop("lab.ovpn")
+        self.w.tick(0.5)
+        self.assertEqual(self.w.tick(3)[0][1], self.tmp / "config" / "vpn" / "lab.ovpn")
+
+    def test_collision_suffix(self):
+        (self.files / "a.zip").write_text("premier")
+        (self.files / "a (2).zip").write_text("deuxième")
+        self.drop("a.zip", "troisième")
+        self.w.tick(0.5)
+        self.assertEqual(self.w.tick(3)[0][1], self.files / "a (3).zip")
+        self.assertEqual((self.files / "a.zip").read_text(), "premier")
+        self.assertEqual(ctf.free_name(self.files, "notes"), self.files / "notes")
+        self.assertEqual(ctf.free_name(self.files, "a.zip"), self.files / "a (4).zip")
+
+    def test_no_current_moves_nothing(self):
+        ctf.challenge_off()
+        self.drop("perso.pdf")
+        self.w.tick(0.5)
+        self.assertEqual(self.w.tick(3), [])
+        ctf.challenge_use("htb/cicada")
+        self.assertEqual(self.w.tick(6), [])
+        self.assertTrue((self.dl / "perso.pdf").exists())
+
+    def test_broken_current_moves_nothing(self):
+        shutil.rmtree(self.d)
+        self.drop("x.zip")
+        self.w.tick(0.5)
+        self.assertEqual(self.w.tick(3), [])
+        self.assertTrue((self.dl / "x.zip").exists())
+
+    def test_vanished_file_is_ignored(self):
+        p = self.drop("parti.zip")
+        self.w.tick(0.5)
+        p.unlink()
+        self.assertEqual(self.w.tick(3), [])
+
+    def test_watch_notifies(self):
+        self.drop("n.zip")
+        calls = []
+        with mock.patch.object(ctf.subprocess, "run", side_effect=lambda *a, **k: calls.append(a[0])):
+            ctf.notify([(self.dl / "n.zip", self.files / "n.zip")])
+        self.assertEqual(calls[0][0], "notify-send")
+        self.assertIn("n.zip rangé dans htb/cicada", " ".join(calls[0]))
+
+    def test_service_file(self):
+        unit = (Path(SCRIPT).parent / "ctf-downloads.service").read_text()
+        self.assertIn("ExecStart=%h/.local/bin/ctf watch", unit)
+        self.assertIn("WantedBy=default.target", unit)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -156,6 +156,108 @@ def challenges():
     return sorted(found, key=lambda d: (d / "notes.md").stat().st_mtime, reverse=True)
 
 
+# ---------- téléchargements ----------
+
+PARTIAL = (".crdownload", ".part", ".tmp", ".download")
+STABLE = 2.0  # secondes sans changement de taille avant de déplacer
+
+
+def free_name(directory, name):
+    """Chemin libre dans directory : a.zip, sinon a (2).zip, a (3).zip..."""
+    p = directory / name
+    stem, suffix = Path(name).stem, Path(name).suffix
+    n = 2
+    while p.exists() or p.is_symlink():
+        p = directory / f"{stem} ({n}){suffix}"
+        n += 1
+    return p
+
+
+class Watcher:
+    """Déplace les nouveaux fichiers du dossier de téléchargements.
+
+    Les fichiers présents au démarrage, et ceux arrivés sans challenge en
+    cours, ne sont jamais déplacés. Les .ovpn vont toujours dans le dossier VPN.
+    """
+
+    def __init__(self, now):
+        self.dl = paths()["downloads"]
+        self.seen = set(self.names())
+        self.pending = {}  # nom -> (taille, depuis)
+
+    def names(self):
+        try:
+            return [e.name for e in os.scandir(self.dl)
+                    if not e.name.startswith(".") and not e.name.endswith(PARTIAL) and e.is_file()]
+        except OSError:
+            return []
+
+    def tick(self, now):
+        present = self.names()
+        live = set(present)
+        self.seen &= live
+        self.pending = {k: v for k, v in self.pending.items() if k in live}
+        moves = []
+        for name in present:
+            if name in self.seen:
+                continue
+            src = self.dl / name
+            try:
+                size = src.stat().st_size
+            except OSError:
+                continue
+            old = self.pending.get(name)
+            if old is None or old[0] != size:
+                self.pending[name] = (size, now)
+                continue
+            if now - old[1] < STABLE:
+                continue
+            del self.pending[name]
+            if name.lower().endswith(".ovpn"):
+                target_dir = paths()["config"] / "vpn"
+            else:
+                cur = current()
+                if cur is None:
+                    self.seen.add(name)
+                    continue
+                target_dir = cur / "fichiers"
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                dst = free_name(target_dir, name)
+                shutil.move(str(src), str(dst))
+            except OSError as e:
+                err(f"Impossible de déplacer {name} : {e}")
+                self.seen.add(name)
+                continue
+            moves.append((src, dst))
+        return moves
+
+
+def notify(moves):
+    for src, dst in moves:
+        if dst.parent == paths()["config"] / "vpn":
+            msg = f"{dst.name} ajouté aux fichiers VPN (ctf vpn)"
+        else:
+            msg = f"{dst.name} rangé dans {label(dst.parent.parent)}"
+        print(msg, flush=True)
+        try:
+            subprocess.run(["notify-send", "-a", "ctf", "Téléchargement rangé", msg],
+                           capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def watch():
+    w = Watcher(time.monotonic())
+    print(f"Surveillance de {w.dl}", flush=True)
+    try:
+        while True:
+            notify(w.tick(time.monotonic()))
+            time.sleep(1)
+    except KeyboardInterrupt:
+        return 0
+
+
 # ---------- état ----------
 
 def tun_ip():
@@ -222,6 +324,8 @@ def main(argv=None):
             challenge_off()
             print("Plus de challenge en cours : les téléchargements restent dans ~/Downloads.")
             return 0
+        if cmd == "watch" and not args:
+            return watch()
         if cmd == "ls" and not args:
             cur = current()
             for d in challenges():
