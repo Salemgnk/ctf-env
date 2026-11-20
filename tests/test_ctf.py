@@ -126,6 +126,13 @@ class TestChallenges(Case):
         self.assertEqual(code, 0)
         self.assertIn("Aucun challenge en cours", out)
 
+    def test_path_command(self):
+        code, out, err = self.run_main("path")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Aucun challenge en cours", err)
+        self.run_main("new", "htb/cicada")
+        self.assertEqual(self.run_main("path")[:2], (0, str(self.root / "htb" / "cicada") + "\n"))
+
     def test_help_and_unknown(self):
         self.assertEqual(self.run_main("--help")[0], 0)
         self.assertEqual(self.run_main("nimporte")[0], 2)

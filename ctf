@@ -434,6 +434,13 @@ def main(argv=None):
             challenge_off()
             print("Plus de challenge en cours : les téléchargements restent dans ~/Downloads.")
             return 0
+        if cmd == "path" and not args:
+            cur = current()
+            if not cur:
+                err("Aucun challenge en cours.")
+                return 1
+            print(cur)
+            return 0
         if cmd == "vpn":
             if args[:1] == ["stop"] and len(args) == 1:
                 return vpn_stop()
