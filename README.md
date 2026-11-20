@@ -31,6 +31,19 @@ ctf vpn stop                     coupe le VPN
 
 Chaque challenge contient `notes.md`, `fichiers/` et `scans/`.
 
+## Tri des artefacts
+
+Quand un fichier arrive dans un challenge, il est identifié selon son type (exiftool, binwalk, zsteg pour une image ; file, checksec, strings pour un binaire ; tshark pour une capture...). Le détail va dans `scans/<fichier>.txt`, un résumé et une catégorie devinée (stégano, reverse, forensic, forensic-réseau, crypto, misc) dans `notes.md`. La catégorie s'affiche dans `ctf ls` et la notification ; corrige-la dans `.categorie` si besoin.
+
+## Session et pistes
+
+```
+ctf log      enregistre ta session (commandes et sorties) dans scans/session-<date>.log
+ctf hints    affiche les pistes repérées
+```
+
+Pendant un `ctf log`, le service lit le journal et pousse des pistes par notification : authentification HTTP Basic, nom `.htb` à mettre dans `/etc/hosts`, ports filtrés, service web à énumérer. Les pistes s'ajoutent à la section `## Pistes` de `notes.md`, sans doublon.
+
 ## Téléchargements
 
 Tant qu'un challenge est en cours, chaque nouveau fichier de `~/Downloads` est déplacé dans son dossier `fichiers/`, une fois le téléchargement terminé, avec une notification. Les `.ovpn` vont dans `~/.config/ctf/vpn/`, même sans challenge en cours. Les fichiers déjà présents, ou arrivés sans challenge en cours, ne bougent pas.
