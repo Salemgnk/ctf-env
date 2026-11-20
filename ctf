@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""ctf : ranger les challenges CTF et HTB, y déposer les téléchargements, se connecter au VPN.
+
+Usage :
+  ctf                          où on en est : challenge en cours, VPN, rangement
+  ctf new <groupe>/<nom> [ip]  crée le challenge et le met en cours (ex. ctf new htb/cicada 10.10.11.35)
+  ctf use <groupe>/<nom>       reprend un challenge existant
+  ctf off                      plus de challenge en cours
+  ctf ls                       liste des challenges, les plus récents d'abord
+  ctf path                     chemin du challenge en cours (utilisé par cdc)
+  ctf vpn [nom]                connexion au VPN avec un fichier .ovpn
+  ctf vpn add <fichier.ovpn>   ajoute un fichier VPN
+  ctf vpn stop                 coupe le VPN
+  ctf watch                    range les téléchargements (lancé par le service ctf-downloads)
+
+Tant qu'un challenge est en cours, chaque nouveau fichier de ~/Downloads est
+déplacé dans son dossier fichiers/. Les .ovpn vont dans ~/.config/ctf/vpn/.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+CURRENT = ".courant"
+NOTES = """# {group}/{name}
+
+Créé le {date}.
+
+## Cible
+
+- IP : {ip}
+- Nom d'hôte :
+
+## Ports et services
+
+## Identifiants
+
+## Étapes
+
+## Flags
+
+- user :
+- root :
+"""
+
+
+def downloads_default():
+    try:
+        r = subprocess.run(["xdg-user-dir", "DOWNLOAD"], capture_output=True, text=True, timeout=5)
+        d = r.stdout.strip()
+        if r.returncode == 0 and d and d != str(Path.home()):
+            return Path(d)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return Path.home() / "Downloads"
+
+
+def paths():
+    env, home = os.environ, Path.home()
+    return {
+        "root": Path(env.get("CTF_ROOT") or home / "Documents" / "ctf"),
+        "config": Path(env.get("CTF_CONFIG") or home / ".config" / "ctf"),
+        "cache": Path(env.get("CTF_CACHE") or home / ".cache" / "ctf"),
+        "downloads": Path(env["CTF_DOWNLOADS"]) if env.get("CTF_DOWNLOADS") else downloads_default(),
+    }
+
+
+def err(msg):
+    print(msg, file=sys.stderr)
+
+
+# ---------- challenges ----------
+
+def parse_name(s):
+    parts = s.strip().split("/")
+    if len(parts) != 2 or not all(NAME.match(p) for p in parts):
+        raise ValueError(
+            f"Nom invalide : « {s} ». Attendu groupe/nom, en minuscules, chiffres et tirets "
+            "(ex. htb/cicada ou epihack-2026/obsidian-key)."
+        )
+    return parts[0], parts[1]
+
+
+def challenge_dir(name):
+    group, nom = parse_name(name)
+    return paths()["root"] / group / nom
+
+
+def label(d):
+    return f"{d.parent.name}/{d.name}"
+
+
+def current():
+    link = paths()["root"] / CURRENT
+    if not link.is_symlink():
+        return None
+    target = Path(os.readlink(link))
+    if not target.is_absolute():
+        target = link.parent / target
+    return target if target.is_dir() else None
+
+
+def broken_current():
+    """Chemin visé par un lien .courant dont le dossier a disparu, sinon None."""
+    link = paths()["root"] / CURRENT
+    if link.is_symlink() and current() is None:
+        return Path(os.readlink(link))
+    return None
+
+
+def set_current(d):
+    root = paths()["root"]
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / f".courant.{os.getpid()}.tmp"
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
+    os.symlink(d, tmp)
+    os.replace(tmp, root / CURRENT)
+
+
+def challenge_new(name, ip=None):
+    d = challenge_dir(name)
+    for sub in ("fichiers", "scans"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    notes = d / "notes.md"
+    if not notes.exists():
+        notes.write_text(NOTES.format(group=d.parent.name, name=d.name,
+                                      date=datetime.now().strftime("%d/%m/%Y"), ip=ip or ""),
+                         encoding="utf-8")
+    set_current(d)
+    return d
+
+
+def challenge_use(name):
+    d = challenge_dir(name)
+    if not (d / "notes.md").is_file():
+        raise ValueError(f"Le challenge {name} n'existe pas. Pour le créer : ctf new {name}")
+    set_current(d)
+    return d
+
+
+def challenge_off():
+    link = paths()["root"] / CURRENT
+    if link.is_symlink():
+        link.unlink()
+
+
+def challenges():
+    root = paths()["root"]
+    found = [n.parent for n in root.glob("*/*/notes.md") if n.parent.is_dir() and not n.parent.parent.name.startswith(".")]
+    return sorted(found, key=lambda d: (d / "notes.md").stat().st_mtime, reverse=True)
+
+
+# ---------- état ----------
+
+def tun_ip():
+    try:
+        r = subprocess.run(["ip", "-4", "-o", "addr", "show", "tun0"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", r.stdout)
+    return m.group(1) if m else None
+
+
+def service_state():
+    try:
+        r = subprocess.run(["systemctl", "--user", "is-active", "ctf-downloads"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return "inconnu"
+    return "actif" if r.stdout.strip() == "active" else "arrêté"
+
+
+def status():
+    cur, gone = current(), broken_current()
+    if cur:
+        print(f"Challenge en cours : {label(cur)}")
+        print(f"  {cur}")
+    elif gone:
+        print(f"Le challenge en cours n'existe plus : {gone}")
+        print("  ctf use <groupe>/<nom> pour en choisir un autre, ou ctf off.")
+    else:
+        print("Aucun challenge en cours. ctf new <groupe>/<nom> pour en commencer un.")
+    ip = tun_ip()
+    print(f"VPN : connecté, ton IP est {ip}" if ip else "VPN : non connecté (ctf vpn)")
+    state = service_state()
+    where = f"vers {label(cur)}/fichiers" if cur else "en pause, aucun challenge en cours"
+    print(f"Rangement des téléchargements : {state}, {where}" if state == "actif"
+          else f"Rangement des téléchargements : {state} (systemctl --user start ctf-downloads)")
+    return 0
+
+
+# ---------- commandes ----------
+
+def usage(code):
+    print(__doc__.strip(), file=sys.stdout if code == 0 else sys.stderr)
+    return code
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    cmd, args = (argv[0], argv[1:]) if argv else ("", [])
+    try:
+        if cmd in ("-h", "--help", "help"):
+            return usage(0)
+        if not cmd:
+            return status()
+        if cmd == "new" and 1 <= len(args) <= 2:
+            d = challenge_new(args[0], args[1] if len(args) == 2 else None)
+            print(f"Challenge en cours : {label(d)}\n  {d}\nLes téléchargements arriveront dans {d / 'fichiers'}")
+            return 0
+        if cmd == "use" and len(args) == 1:
+            d = challenge_use(args[0])
+            print(f"Challenge en cours : {label(d)}\n  {d}")
+            return 0
+        if cmd == "off" and not args:
+            challenge_off()
+            print("Plus de challenge en cours : les téléchargements restent dans ~/Downloads.")
+            return 0
+        if cmd == "ls" and not args:
+            cur = current()
+            for d in challenges():
+                mark = "*" if d == cur else " "
+                when = datetime.fromtimestamp((d / "notes.md").stat().st_mtime).strftime("%d/%m/%Y")
+                print(f"{mark} {when}  {label(d)}")
+            return 0
+    except ValueError as e:
+        err(str(e))
+        return 1
+    return usage(2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
