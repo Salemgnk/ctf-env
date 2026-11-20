@@ -138,6 +138,138 @@ class TestChallenges(Case):
         self.assertEqual(self.run_main("nimporte")[0], 2)
 
 
+class TestTriage(Case):
+    def setUp(self):
+        super().setUp()
+        self.d = ctf.challenge_new("epihack/x")
+        self.f = self.d / "fichiers"
+
+    def test_file_kind_by_extension(self):
+        self.assertEqual(ctf.file_kind(Path("a.png")), "image")
+        self.assertEqual(ctf.file_kind(Path("a.PCAPNG")), "pcap")
+        self.assertEqual(ctf.file_kind(Path("a.zip")), "archive")
+        self.assertEqual(ctf.file_kind(Path("a.docx")), "office")
+        self.assertEqual(ctf.file_kind(Path("a.apk")), "apk")
+        self.assertEqual(ctf.file_kind(Path("a.quelquechose")), "data")
+
+    def test_file_kind_by_magic(self):
+        elf = self.f / "sanssuffixe"
+        shutil.copy("/usr/bin/true", elf)
+        self.assertEqual(ctf.file_kind(elf), "elf")
+
+    def test_category_for(self):
+        self.assertEqual(ctf.category_for("image"), "stégano")
+        self.assertEqual(ctf.category_for("pcap"), "forensic-réseau")
+        self.assertEqual(ctf.category_for("elf"), "reverse")
+        self.assertEqual(ctf.category_for("apk"), "reverse")
+        self.assertEqual(ctf.category_for("pdf"), "forensic")
+        self.assertEqual(ctf.category_for("archive"), "misc")
+
+    def test_triage_commands_pick_tools(self):
+        cmds = ctf.triage_commands(self.f / "a.png", "image")
+        names = [c[0] for c in cmds]
+        self.assertIn("exiftool", names)
+        self.assertIn("zsteg", names)
+        self.assertNotIn("zsteg", [c[0] for c in ctf.triage_commands(self.f / "a.jpg", "image")])
+        self.assertIn("tshark", [c[0] for c in ctf.triage_commands(self.f / "a.pcap", "pcap")])
+
+    def test_triage_writes_scan_and_sets_category(self):
+        png = self.f / "flag.png"
+        png.write_bytes(b"\x89PNG\r\n")
+        with mock.patch.object(ctf, "run_tool", return_value="sortie outil"), \
+             mock.patch.object(ctf, "file_desc", return_value="PNG image data"):
+            res = ctf.triage(png)
+        self.assertEqual(res["category"], "stégano")
+        scan = self.d / "scans" / "flag.png.txt"
+        self.assertTrue(scan.exists())
+        self.assertIn("sortie outil", scan.read_text())
+        self.assertEqual(ctf.challenge_category(self.d), "stégano")
+        notes = (self.d / "notes.md").read_text()
+        self.assertIn("flag.png", notes)
+        self.assertIn("stégano", notes)
+
+    def test_triage_keeps_first_category(self):
+        ctf.set_category(self.d, "reverse")
+        png = self.f / "a.png"
+        png.write_bytes(b"x")
+        with mock.patch.object(ctf, "run_tool", return_value=""), \
+             mock.patch.object(ctf, "file_desc", return_value="PNG image data"):
+            ctf.triage(png)
+        self.assertEqual(ctf.challenge_category(self.d), "reverse")
+
+    def test_run_tool_skips_missing(self):
+        with mock.patch.object(ctf.shutil, "which", return_value=None):
+            self.assertIn("non installé", ctf.run_tool(["outilbidon", "x"]))
+
+    def test_ls_shows_category(self):
+        ctf.set_category(self.d, "stégano")
+        out = self.run_main("ls")[1]
+        self.assertIn("stégano", out)
+        self.assertIn("epihack/x", out)
+
+
+class TestHints(Case):
+    NMAP = """PORT     STATE    SERVICE
+22/tcp   open     ssh
+80/tcp   open     http      nginx 1.24.0
+| http-auth:
+|_  Basic realm=Zentara
+255/tcp  filtered unknown
+5030/tcp filtered surfpass
+|_http-title: Did not follow redirect to http://doubletake.htb/
+"""
+
+    def setUp(self):
+        super().setUp()
+        self.d = ctf.challenge_new("htb/doubletake")
+
+    def test_strip_ansi(self):
+        self.assertEqual(ctf.strip_ansi("a\x1b[31mrouge\x1b[0mb\r"), "arougeb")
+
+    def test_hints_detects_http_auth(self):
+        hints = ctf.hints_from(self.NMAP)
+        self.assertTrue(any("Basic" in h and "Zentara" in h for h in hints))
+
+    def test_hints_detects_htb_host(self):
+        self.assertTrue(any("doubletake.htb" in h and "/etc/hosts" in h for h in ctf.hints_from(self.NMAP)))
+
+    def test_hints_lists_filtered_ports(self):
+        h = " ".join(ctf.hints_from(self.NMAP))
+        self.assertIn("255", h)
+        self.assertIn("5030", h)
+
+    def test_hints_dedup(self):
+        hints = ctf.hints_from(self.NMAP + self.NMAP)
+        self.assertEqual(len(hints), len(set(hints)))
+
+    def test_new_hints_written_once(self):
+        log = self.d / "scans" / "session-x.log"
+        log.write_text(self.NMAP)
+        first = ctf.new_hints(self.d)
+        self.assertTrue(first)
+        self.assertEqual(ctf.new_hints(self.d), [])
+        notes = (self.d / "notes.md").read_text()
+        self.assertIn("## Pistes", notes)
+        self.assertIn("Zentara", notes)
+
+    def test_log_command(self):
+        with mock.patch.object(ctf.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(ctf.shutil, "which", return_value="/usr/bin/script"):
+            code = self.run_main("log")[0]
+        self.assertEqual(code, 0)
+        args = run.call_args[0][0]
+        self.assertEqual(args[0], "script")
+        self.assertTrue(str(args[-1]).endswith(".log"))
+        self.assertIn(str(self.d / "scans"), str(args[-1]))
+
+    def test_log_needs_challenge(self):
+        ctf.challenge_off()
+        with mock.patch.object(ctf, "challenge_here", return_value=None):
+            code, _, err = self.run_main("log")
+        self.assertEqual(code, 1)
+        self.assertIn("challenge", err.lower())
+
+
 class TestWatcher(Case):
     def setUp(self):
         super().setUp()
@@ -244,13 +376,14 @@ class TestWatcher(Case):
         p.unlink()
         self.assertEqual(self.w.tick(3), [])
 
-    def test_watch_notifies(self):
-        self.drop("n.zip")
+    def test_watch_notifies_with_category(self):
+        (self.files / "n.png").write_bytes(b"x")
         calls = []
-        with mock.patch.object(ctf.subprocess, "run", side_effect=lambda *a, **k: calls.append(a[0])):
-            ctf.notify([(self.dl / "n.zip", self.files / "n.zip")])
+        with mock.patch.object(ctf, "triage", return_value={"category": "stégano"}), \
+             mock.patch.object(ctf.subprocess, "run", side_effect=lambda *a, **k: calls.append(a[0])):
+            ctf.notify([(self.dl / "n.png", self.files / "n.png")])
         self.assertEqual(calls[0][0], "notify-send")
-        self.assertIn("n.zip rangé dans htb/cicada", " ".join(calls[0]))
+        self.assertIn("n.png rangé dans htb/cicada [stégano]", " ".join(calls[0]))
 
     def test_service_file(self):
         unit = (Path(SCRIPT).parent / "ctf-downloads.service").read_text()

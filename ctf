@@ -237,18 +237,29 @@ class Watcher:
         return moves
 
 
-def notify(moves):
-    for src, dst in moves:
-        if dst.parent == paths()["config"] / "vpn":
-            msg = f"{dst.name} ajouté aux fichiers VPN (ctf vpn)"
-        else:
-            msg = f"{dst.name} rangé dans {label(dst.parent.parent)}"
-        print(msg, flush=True)
+def describe_move(dst):
+    if dst.parent == paths()["config"] / "vpn":
+        return f"{dst.name} ajouté aux fichiers VPN (ctf vpn)"
+    if dst.parent.name == "fichiers":
         try:
-            subprocess.run(["notify-send", "-a", "ctf", "Téléchargement rangé", msg],
-                           capture_output=True, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            pass
+            res = triage(dst)
+            return f"{dst.name} rangé dans {label(dst.parent.parent)} [{res['category']}]"
+        except Exception as e:  # le rangement reste fiable même si un outil casse
+            err(f"Tri de {dst.name} impossible : {e}")
+    return f"{dst.name} rangé dans {label(dst.parent.parent)}"
+
+
+def send(title, msg):
+    print(msg, flush=True)
+    try:
+        subprocess.run(["notify-send", "-a", "ctf", title, msg], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def notify(moves):
+    for _, dst in moves:
+        send("Téléchargement rangé", describe_move(dst))
 
 
 def watch():
@@ -257,6 +268,8 @@ def watch():
     try:
         while True:
             notify(w.tick(time.monotonic()))
+            for h in new_hints(current()):
+                send("Piste CTF", h)
             time.sleep(1)
     except KeyboardInterrupt:
         return 0
@@ -382,6 +395,229 @@ def vpn_stop():
     return 0
 
 
+# ---------- tri des artefacts ----------
+
+KINDS = {
+    "image": {"png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif", "svg", "ico"},
+    "audio": {"wav", "mp3", "flac", "ogg", "m4a"},
+    "video": {"mp4", "avi", "mkv", "mov", "webm"},
+    "pcap": {"pcap", "pcapng", "cap"},
+    "archive": {"zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "zst"},
+    "pdf": {"pdf"},
+    "office": {"doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "odt"},
+    "elf": {"elf", "so", "o", "bin"},
+    "pe": {"exe", "dll", "msi"},
+    "apk": {"apk"},
+    "jar": {"jar", "class"},
+    "forensic-image": {"raw", "mem", "vmem", "dd", "img", "e01", "lime", "dmp", "vhd", "ad1"},
+    "crypto": {"pem", "key", "enc", "cipher", "gpg"},
+    "source": {"py", "js", "php", "rb", "c", "cpp", "go", "java", "sh"},
+    "text": {"txt", "md", "log", "json", "csv", "xml", "yaml", "yml"},
+}
+CATEGORY = {
+    "image": "stégano", "audio": "stégano", "video": "stégano",
+    "pcap": "forensic-réseau", "forensic-image": "forensic",
+    "elf": "reverse", "pe": "reverse", "apk": "reverse", "jar": "reverse",
+    "pdf": "forensic", "office": "forensic", "crypto": "crypto",
+    "archive": "misc", "source": "misc", "text": "misc", "data": "misc",
+}
+TOOL_CAP = 6000  # caractères gardés par commande
+
+
+def file_desc(path):
+    try:
+        r = subprocess.run(["file", "-b", str(path)], capture_output=True, text=True, timeout=15)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def file_kind(path):
+    ext = Path(path).suffix.lower().lstrip(".")
+    for kind, exts in KINDS.items():
+        if ext in exts:
+            return kind
+    desc = file_desc(path)
+    table = [("ELF", "elf"), ("PE32", "pe"), ("MS-DOS", "pe"), ("PNG image", "image"),
+             ("JPEG", "image"), ("image data", "image"), ("pcap", "pcap"), ("PDF", "pdf"),
+             ("gzip", "archive"), ("Zip archive", "archive"), ("tar archive", "archive"),
+             ("Audio", "audio"), ("ASCII", "text"), ("Unicode text", "text")]
+    for needle, kind in table:
+        if needle in desc:
+            return kind
+    return "data"
+
+
+def category_for(kind):
+    return CATEGORY.get(kind, "misc")
+
+
+def triage_commands(path, kind):
+    p, ext = str(path), Path(path).suffix.lower().lstrip(".")
+    if kind in ("image", "audio", "video"):
+        cmds = [["exiftool", p], ["binwalk", p]]
+        if ext in ("png", "bmp"):
+            cmds.append(["zsteg", "-a", p])
+        return cmds
+    if kind in ("elf", "pe"):
+        return [["file", p], ["checksec", "--file", p], ["strings", "-n", "8", p]]
+    if kind in ("apk", "jar"):
+        return [["file", p], ["unzip", "-l", p]]
+    if kind == "pcap":
+        return [["capinfos", p], ["tshark", "-r", p, "-q", "-z", "io,phs"]]
+    if kind == "archive":
+        return [["7z", "l", p]]
+    if kind == "pdf":
+        return [["exiftool", p], ["pdftotext", p, "-"]]
+    if kind == "office":
+        return [["exiftool", p], ["olevba", p]]
+    if kind == "forensic-image":
+        return [["file", p]]
+    return [["file", p], ["strings", "-n", "8", p]]
+
+
+def run_tool(cmd, timeout=90):
+    if shutil.which(cmd[0]) is None:
+        return f"[{cmd[0]} non installé]"
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"[{cmd[0]} : délai dépassé]"
+    except OSError as e:
+        return f"[{cmd[0]} : {e}]"
+    out = (r.stdout or "") + (r.stderr or "")
+    return out[:TOOL_CAP] + ("\n[... tronqué]" if len(out) > TOOL_CAP else "")
+
+
+def challenge_category(d):
+    f = d / ".categorie"
+    return f.read_text().strip() if f.is_file() else None
+
+
+def set_category(d, cat):
+    (d / ".categorie").write_text(cat + "\n", encoding="utf-8")
+
+
+def append_section(notes, header, line):
+    """Ajoute line sous header dans notes.md, en créant la section au besoin, sans doublon."""
+    text = notes.read_text(encoding="utf-8") if notes.exists() else ""
+    if line in text:
+        return
+    if header in text:
+        parts = text.split(header, 1)
+        rest = parts[1].split("\n", 1)
+        text = parts[0] + header + rest[0] + "\n" + line + ("\n" + rest[1] if len(rest) > 1 else "\n")
+    else:
+        text = text.rstrip() + f"\n\n{header}\n\n{line}\n"
+    notes.write_text(text, encoding="utf-8")
+
+
+def triage(path):
+    challenge = path.parent.parent
+    kind = file_kind(path)
+    cat = category_for(kind)
+    desc = file_desc(path)
+    scans = challenge / "scans"
+    scans.mkdir(parents=True, exist_ok=True)
+    out = [f"# {path.name}", f"Type : {kind} — catégorie : {cat}", f"file : {desc}", ""]
+    for cmd in triage_commands(path, kind):
+        out.append(f"$ {' '.join(cmd)}")
+        out.append(run_tool(cmd))
+        out.append("")
+    (scans / f"{path.name}.txt").write_text("\n".join(out), encoding="utf-8")
+    if challenge_category(challenge) in (None, "", "misc"):
+        set_category(challenge, cat)
+    append_section(challenge / "notes.md", "## Artefacts",
+                   f"- `{path.name}` — {cat} — {desc} (voir scans/{path.name}.txt)")
+    return {"kind": kind, "category": cat, "scan": scans / f"{path.name}.txt"}
+
+
+# ---------- pistes ----------
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|[\r\x00-\x08\x0b\x0c\x0e\x1f]")
+
+
+def strip_ansi(s):
+    return ANSI.sub("", s)
+
+
+def hints_from(text):
+    hints, seen = [], set()
+
+    def add(h):
+        if h not in seen:
+            seen.add(h)
+            hints.append(h)
+
+    m = re.search(r"[Bb]asic realm[=:]?\s*[\"']?([\w .-]+)", text)
+    if m or "401 Unauthorized" in text or "401 UNAUTHORIZED" in text:
+        realm = f" (realm {m.group(1).strip()})" if m else ""
+        add(f"Un service web est protégé par une authentification HTTP Basic{realm}. "
+            "Essaie des identifiants par défaut, puis un brute léger (ffuf/hydra).")
+    for host in dict.fromkeys(re.findall(r"\b([a-z0-9][a-z0-9.-]*\.htb)\b", text)):
+        add(f"Ajoute « {host} » à /etc/hosts (nom .htb repéré).")
+    filt = dict.fromkeys(re.findall(r"(\d+)/tcp\s+filtered", text))
+    if filt:
+        add(f"Ports filtrés : {', '.join(filt)}. Pare-feu probable ; retente plus tard ou regarde l'UDP.")
+    for port in dict.fromkeys(re.findall(r"(\d+)/tcp\s+open\s+http", text)):
+        add(f"Service HTTP sur le port {port} : énumère les répertoires (ffuf/gobuster) et les vhosts.")
+    return hints
+
+
+def session_text(d):
+    chunks = []
+    scans = d / "scans"
+    if scans.is_dir():
+        for f in sorted(scans.glob("session-*.log")) + sorted(scans.glob("*.nmap")):
+            try:
+                chunks.append(strip_ansi(f.read_text(errors="replace")))
+            except OSError:
+                pass
+    return "\n".join(chunks)
+
+
+def new_hints(d):
+    if d is None:
+        return []
+    done_file = d / "scans" / ".pistes.txt"
+    done = set(done_file.read_text(encoding="utf-8").splitlines()) if done_file.is_file() else set()
+    fresh = [h for h in hints_from(session_text(d)) if h not in done]
+    if fresh:
+        done_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(done_file, "a", encoding="utf-8") as f:
+            for h in fresh:
+                f.write(h + "\n")
+        for h in fresh:
+            append_section(d / "notes.md", "## Pistes", f"- {h}")
+    return fresh
+
+
+def challenge_here():
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError:
+        return None
+    root = paths()["root"].resolve()
+    for d in (cwd, *cwd.parents):
+        if d.parent.parent == root and (d / "notes.md").is_file():
+            return d
+    return None
+
+
+def do_log(target):
+    if shutil.which("script") is None:
+        err("La commande script (util-linux) est introuvable.")
+        return 1
+    scans = target / "scans"
+    scans.mkdir(parents=True, exist_ok=True)
+    log = scans / f"session-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+    print(f"Enregistrement dans {log}\nTape « exit » pour arrêter. Pistes poussées pendant ce temps.")
+    subprocess.run(["script", "-q", "-a", str(log)])
+    for h in new_hints(target):
+        print(f"Piste : {h}")
+    return 0
+
+
 # ---------- état ----------
 
 def tun_ip():
@@ -471,7 +707,22 @@ def main(argv=None):
             for d in challenges():
                 mark = "*" if d == cur else " "
                 when = datetime.fromtimestamp((d / "notes.md").stat().st_mtime).strftime("%d/%m/%Y")
-                print(f"{mark} {when}  {label(d)}")
+                cat = challenge_category(d) or "?"
+                print(f"{mark} {when}  {cat:<16} {label(d)}")
+            return 0
+        if cmd == "log" and not args:
+            target = challenge_here() or current()
+            if not target:
+                err("Aucun challenge où enregistrer. Place-toi dans un challenge ou fais ctf new/use.")
+                return 1
+            return do_log(target)
+        if cmd == "hints" and not args:
+            target = challenge_here() or current()
+            if not target:
+                err("Aucun challenge en cours.")
+                return 1
+            found = new_hints(target)
+            print("\n".join(f"- {h}" for h in hints_from(session_text(target))) or "Aucune piste pour l'instant.")
             return 0
     except ValueError as e:
         err(str(e))
