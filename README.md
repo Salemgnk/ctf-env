@@ -22,14 +22,18 @@ ctf new htb/cicada 10.10.11.35   crée ~/Documents/ctf/htb/cicada et le met en c
 ctf use htb/cicada               reprend un challenge
 ctf off                          plus de challenge en cours
 ctf ls                           liste des challenges
-ctf                              challenge en cours, VPN, rangement
+ctf                              challenge en cours, VPN, rangement, IP, flags
 cdc                              cd dans le challenge en cours
+ctf ip [adresse]                 lire ou changer l'IP cible
+ctf flag user|root|<nom> <val>   enregistrer un flag
+ctf note <texte>                 note horodatée dans le journal
+ctf scan                         nmap -sC -sV sur l'IP, rangé puis pistes
 ctf vpn [nom]                    connexion VPN (sudo)
 ctf vpn add fichier.ovpn         ajoute un fichier VPN
 ctf vpn stop                     coupe le VPN
 ```
 
-Chaque challenge contient `notes.md`, `fichiers/` et `scans/`.
+Chaque challenge contient `notes.md`, `fichiers/` et `scans/`. `install.sh` ajoute aussi la complétion Tab (`ctf <Tab>`, et les noms de challenges pour `ctf use`).
 
 ## Tri des artefacts
 

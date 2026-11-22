@@ -8,6 +8,10 @@ Usage :
   ctf off                      plus de challenge en cours
   ctf ls                       liste des challenges, les plus récents d'abord
   ctf path                     chemin du challenge en cours (utilisé par cdc)
+  ctf ip [adresse]             lire ou changer l'IP cible du challenge
+  ctf flag [user|root|<nom>] <valeur>   enregistrer un flag
+  ctf note <texte>             ajouter une note horodatée au journal
+  ctf scan                     nmap -sC -sV sur l'IP, rangé dans scans/, puis pistes
   ctf vpn [nom]                connexion au VPN avec un fichier .ovpn
   ctf vpn add <fichier.ovpn>   ajoute un fichier VPN
   ctf vpn stop                 coupe le VPN
@@ -638,11 +642,98 @@ def service_state():
     return "actif" if r.stdout.strip() == "active" else "arrêté"
 
 
+# ---------- champs des notes, flags, journal ----------
+
+FLAG_SLOTS = ("user", "root")
+COMMANDS = ("new", "use", "off", "ls", "path", "ip", "flag", "note", "scan",
+            "vpn", "log", "hints", "watch")
+
+
+def active():
+    """Le challenge visé : celui du dossier courant, sinon le challenge en cours."""
+    return challenge_here() or current()
+
+
+def read_field(challenge, key):
+    try:
+        for line in (challenge / "notes.md").read_text(encoding="utf-8").splitlines():
+            m = re.match(rf"\s*-\s*{re.escape(key)}\s*:\s*(.*)", line)
+            if m:
+                return m.group(1).strip()
+    except OSError:
+        pass
+    return ""
+
+
+def set_field(challenge, key, value, section=None):
+    """Remplace la ligne « - key : ... » des notes, ou l'ajoute sous section."""
+    notes = challenge / "notes.md"
+    try:
+        lines = notes.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    pat = re.compile(rf"\s*-\s*{re.escape(key)}\s*:.*")
+    for i, line in enumerate(lines):
+        if pat.fullmatch(line):
+            lines[i] = f"- {key} : {value}".rstrip()
+            notes.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return
+    if section:
+        append_section(notes, section, f"- {key} : {value}".rstrip())
+    else:
+        lines.append(f"- {key} : {value}".rstrip())
+        notes.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def add_journal(challenge, text):
+    stamp = datetime.now().strftime("%H:%M %d/%m")
+    append_section(challenge / "notes.md", "## Journal", f"- [{stamp}] {text}")
+
+
+def scan_args(ip):
+    return ["nmap", "-sC", "-sV", ip]
+
+
+def do_scan():
+    cur = active()
+    if not cur:
+        err("Aucun challenge en cours. ctf new <groupe>/<nom>.")
+        return 1
+    ip = read_field(cur, "IP")
+    if not ip:
+        err("Pas d'IP enregistrée pour ce challenge. Fais : ctf ip <adresse>")
+        return 1
+    if shutil.which("nmap") is None:
+        err("nmap est introuvable.")
+        return 1
+    scans = cur / "scans"
+    scans.mkdir(parents=True, exist_ok=True)
+    out_file = scans / f"nmap-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    print(f"nmap -sC -sV {ip} (ça peut prendre une minute)...")
+    r = subprocess.run(scan_args(ip), capture_output=True, text=True, errors="replace")
+    out_file.write_text((r.stdout or "") + (r.stderr or ""), encoding="utf-8")
+    print((r.stdout or "").strip() or "(pas de sortie)")
+    hints = new_hints(cur)
+    if hints:
+        print("\nPistes :")
+        for h in hints:
+            print(f"- {h}")
+    return 0
+
+
+# ---------- état ----------
+
 def status():
     cur, gone = current(), broken_current()
     if cur:
         print(f"Challenge en cours : {label(cur)}")
         print(f"  {cur}")
+        ip = read_field(cur, "IP")
+        if ip:
+            print(f"  cible : {ip}")
+        got = [s for s in FLAG_SLOTS if read_field(cur, s)]
+        if got:
+            print(f"  flags : {', '.join(got)}")
     elif gone:
         print(f"Le challenge en cours n'existe plus : {gone}")
         print("  ctf use <groupe>/<nom> pour en choisir un autre, ou ctf off.")
@@ -700,6 +791,45 @@ def main(argv=None):
                 return 0
             if len(args) <= 1:
                 return vpn_start(args[0] if args else None)
+        if cmd == "_complete" and len(args) >= 1:
+            if args[0] == "commands":
+                print("\n".join(COMMANDS))
+            elif args[0] == "challenges":
+                print("\n".join(label(d) for d in challenges()))
+            elif args[0] == "vpn":
+                print("\n".join(f.stem for f in vpn_files()))
+            return 0
+        if cmd == "ip" and len(args) <= 1:
+            cur = active()
+            if not cur:
+                err("Aucun challenge en cours. ctf new <groupe>/<nom>.")
+                return 1
+            if args:
+                set_field(cur, "IP", args[0], section="## Cible")
+                print(f"IP du challenge : {args[0]}")
+            else:
+                ip = read_field(cur, "IP")
+                print(ip if ip else "Pas d'IP enregistrée. ctf ip <adresse>")
+            return 0
+        if cmd == "flag" and 1 <= len(args) <= 2:
+            cur = active()
+            if not cur:
+                err("Aucun challenge en cours. ctf new <groupe>/<nom>.")
+                return 1
+            slot, value = ("flag", args[0]) if len(args) == 1 else (args[0], args[1])
+            set_field(cur, slot, value, section="## Flags")
+            print(f"Flag {slot} enregistré dans {label(cur)}.")
+            return 0
+        if cmd == "note" and args:
+            cur = active()
+            if not cur:
+                err("Aucun challenge en cours. ctf new <groupe>/<nom>.")
+                return 1
+            add_journal(cur, " ".join(args))
+            print("Note ajoutée au journal.")
+            return 0
+        if cmd == "scan" and not args:
+            return do_scan()
         if cmd == "watch" and not args:
             return watch()
         if cmd == "ls" and not args:

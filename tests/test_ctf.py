@@ -505,5 +505,94 @@ class TestVpn(Case):
         self.assertEqual([p.name for p in ctf.vpn_files()], ["a.ovpn", "b.ovpn"])
 
 
+class TestOps(Case):
+    def setUp(self):
+        super().setUp()
+        self.d = ctf.challenge_new("htb/doubletake", "10.10.11.35")
+
+    def test_ip_get_set(self):
+        self.assertEqual(self.run_main("ip")[1].strip(), "10.10.11.35")
+        self.assertEqual(self.run_main("ip", "10.10.11.99")[0], 0)
+        self.assertEqual(ctf.read_field(self.d, "IP"), "10.10.11.99")
+        self.assertEqual(self.run_main("ip")[1].strip(), "10.10.11.99")
+
+    def test_ip_without_challenge(self):
+        ctf.challenge_off()
+        with mock.patch.object(ctf, "challenge_here", return_value=None):
+            self.assertEqual(self.run_main("ip")[0], 1)
+
+    def test_flag_user_root_replace(self):
+        self.run_main("flag", "user", "abc123")
+        self.run_main("flag", "root", "def456")
+        notes = (self.d / "notes.md").read_text()
+        self.assertIn("- user : abc123", notes)
+        self.assertIn("- root : def456", notes)
+        self.run_main("flag", "user", "zzz")
+        notes = (self.d / "notes.md").read_text()
+        self.assertEqual(notes.count("- user :"), 1)
+        self.assertIn("- user : zzz", notes)
+
+    def test_flag_default_and_custom_slot(self):
+        self.run_main("flag", "FLAGXYZ")
+        self.assertIn("- flag : FLAGXYZ", (self.d / "notes.md").read_text())
+        self.run_main("flag", "web", "W{1}")
+        self.assertIn("- web : W{1}", (self.d / "notes.md").read_text())
+
+    def test_note_appends_journal(self):
+        self.assertEqual(self.run_main("note", "ouvert", "le", "port", "8080")[0], 0)
+        notes = (self.d / "notes.md").read_text()
+        self.assertIn("## Journal", notes)
+        self.assertIn("ouvert le port 8080", notes)
+
+    def test_status_shows_ip_and_flags(self):
+        self.run_main("flag", "user", "abc")
+        with mock.patch.object(ctf, "tun_ip", return_value=None), \
+             mock.patch.object(ctf, "service_state", return_value="actif"):
+            out = self.run_main()[1]
+        self.assertIn("10.10.11.35", out)
+        self.assertIn("user", out)
+
+    def test_scan_runs_nmap_and_hints(self):
+        done = mock.Mock(returncode=0, stdout="80/tcp open http\n|_ Basic realm=X\n", stderr="")
+        with mock.patch.object(ctf.shutil, "which", return_value="/usr/bin/nmap"), \
+             mock.patch.object(ctf.subprocess, "run", return_value=done) as run, \
+             mock.patch.object(ctf, "new_hints", return_value=["une piste"]) as nh:
+            code, out, _ = self.run_main("scan")
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_args[0][0][0], "nmap")
+        self.assertIn("10.10.11.35", run.call_args[0][0])
+        self.assertTrue(list((self.d / "scans").glob("nmap-*.txt")))
+        nh.assert_called()
+        self.assertIn("une piste", out)
+
+    def test_scan_needs_ip(self):
+        ctf.set_field(self.d, "IP", "", section="## Cible")
+        code, _, err = self.run_main("scan")
+        self.assertEqual(code, 1)
+        self.assertIn("IP", err)
+
+    def test_scan_without_nmap(self):
+        with mock.patch.object(ctf.shutil, "which", return_value=None):
+            self.assertEqual(self.run_main("scan")[0], 1)
+
+    def test_complete(self):
+        ctf.challenge_new("epihack/x")
+        cmds = self.run_main("_complete", "commands")[1].split()
+        for c in ("new", "use", "scan", "flag", "ip", "note", "vpn"):
+            self.assertIn(c, cmds)
+        chals = self.run_main("_complete", "challenges")[1].split()
+        self.assertIn("htb/doubletake", chals)
+        self.assertIn("epihack/x", chals)
+
+    def test_completion_files(self):
+        comp = Path(ctf.__file__).resolve().parent / "completions"
+        z = (comp / "_ctf").read_text()
+        b = (comp / "ctf.bash").read_text()
+        self.assertIn("#compdef ctf", z)
+        self.assertIn("_complete commands", z)
+        self.assertIn("_complete challenges", z)
+        self.assertIn("complete -F", b)
+
+
 if __name__ == "__main__":
     unittest.main()
