@@ -3,7 +3,27 @@
 # Relançable sans risque, par exemple après une mise à jour d'impacket.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+src="${BASH_SOURCE[0]:-$0}"
+here="$(cd "$(dirname "$src")" 2>/dev/null && pwd || true)"
+
+# Lancé via « curl -fsSL .../install.sh | bash » : pas de fichiers sous la main,
+# on clone le dépôt puis on relance l'install depuis la copie.
+if [ -z "${here:-}" ] || [ ! -f "$here/ctf" ]; then
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git est nécessaire pour cette installation." >&2
+    exit 1
+  fi
+  repo="https://github.com/Salemgnk/ctf-env.git"
+  dest="${XDG_DATA_HOME:-$HOME/.local/share}/ctf-env"
+  echo "Récupération de ctf-env dans $dest..."
+  if [ -d "$dest/.git" ]; then
+    git -C "$dest" pull --ff-only -q || true
+  else
+    git clone -q "$repo" "$dest"
+  fi
+  exec bash "$dest/install.sh"
+fi
+
 bin="$HOME/.local/bin"
 mkdir -p "$bin"
 

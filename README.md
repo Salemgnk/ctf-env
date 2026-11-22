@@ -4,16 +4,24 @@ Environnement de travail pour les CTF et les machines HTB : un dossier rangé pa
 
 ## Installation
 
+En une ligne (une fois le dépôt public) :
+
+```
+curl -fsSL https://raw.githubusercontent.com/Salemgnk/ctf-env/main/install.sh | bash
+```
+
+Ou depuis le dépôt cloné :
+
 ```
 ./install.sh
 ```
 
-Relançable, par exemple après une mise à jour d'impacket. Le script :
+Le script est le même : lancé par `curl | bash`, il clone le dépôt dans `~/.local/share/ctf-env` puis s'installe. Relançable, par exemple après une mise à jour d'impacket. Il :
 
 - crée le lien `~/.local/bin/ctf` ;
 - crée `impacket-secretsdump`, `impacket-GetUserSPNs`... vers les scripts du paquet Arch `impacket` ;
 - active le service utilisateur `ctf-downloads` ;
-- ajoute la fonction `cdc` à `~/.zshrc`.
+- installe la complétion Tab et ajoute la fonction `cdc` à `~/.zshrc`.
 
 ## Utilisation
 
