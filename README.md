@@ -4,7 +4,7 @@ Environnement de travail pour les CTF et les machines HTB : un dossier rangé pa
 
 ## Installation
 
-En une ligne (une fois le dépôt public) :
+En une ligne :
 
 ```
 curl -fsSL https://raw.githubusercontent.com/Salemgnk/ctf-env/main/install.sh | bash
